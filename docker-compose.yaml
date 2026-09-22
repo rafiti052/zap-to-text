@@ -1,0 +1,23 @@
+# Single-container Baileys bridge (no Evolution / Postgres / Redis / Python).
+# Usage: ./up.sh
+#   or: docker compose --env-file .env up -d --build
+
+services:
+  bridge:
+    build:
+      context: ./bridge
+    image: transcrevezap-bridge:local
+    container_name: baileys-bridge
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      - TRANSCRIBE_GROUP_JID=120363412859178311@g.us
+      - AUTH_DIR=/app/data/auth
+      - SEEN_IDS_PATH=/app/data/seen-ids.json
+      - TRANSCRIPTS_DIR=/app/transcripts
+      - LOG_LEVEL=info
+    volumes:
+      - ./data:/app/data
+      - ./transcripts:/app/transcripts
+    # No published ports — WhatsApp outbound + OpenAI only

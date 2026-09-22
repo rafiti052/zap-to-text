@@ -1,0 +1,11 @@
+.env
+LOCAL_CREDENTIALS.txt
+.openai_key.tmp
+
+transcripts/*
+!transcripts/.gitkeep
+
+# Baileys bridge session + dedup (volume-mounted)
+data/auth/
+data/seen-ids.json
+bridge/node_modules/
