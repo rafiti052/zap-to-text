@@ -22,12 +22,20 @@ check() {
   fi
 }
 
-# mentions_protected_env returns 0 (true) when DENY
+# mentions_protected_env returns 0 (true) when DENY (used by read/write hooks)
 check concat deny mentions_protected_env 'p=("."+"env"); open(p)'
 check compose deny mentions_protected_env 'docker compose --env-file .env up'
 check chr deny mentions_protected_env 'open(chr(46)+"env")'
 check other allow mentions_protected_env 'cat ./readme.md'
 check example allow mentions_protected_env 'cp .env.example ./tmp'
+
+# shell_touches_protected_env: deny file access; allow prose mentions without accessors
+check shell_concat deny shell_touches_protected_env 'p=("."+"env"); open(p)'
+check shell_compose deny shell_touches_protected_env 'docker compose --env-file .env up'
+check shell_chr deny shell_touches_protected_env 'open(chr(46)+"env")'
+check shell_prose allow shell_touches_protected_env "echo 'docs mention .env file'"
+check shell_dotenv_word allow shell_touches_protected_env "echo 'docs mention dotenv file'"
+check shell_readme allow shell_touches_protected_env 'cat ./readme.md'
 
 check base_env deny is_protected_env_basename '.env'
 check base_local deny is_protected_env_basename '.env.local'
@@ -57,6 +65,9 @@ done
 
 out=$(jq -n --arg c 'docker compose ps' '{command:$c}' | bash .cursor/hooks/block-env-shell.sh)
 echo "$out" | grep -q '"allow"' && echo OK shell_allow_ps || { echo FAIL shell_allow_ps; fail=1; }
+
+out=$(jq -n --arg c "echo 'docs mention .env file'" '{command:$c}' | bash .cursor/hooks/block-env-shell.sh)
+echo "$out" | grep -q '"allow"' && echo OK shell_allow_prose || { echo FAIL shell_allow_prose; fail=1; }
 
 out=$(printf '%s' '{"tool_input":{"path":"/repo/.env"}}' | bash .cursor/hooks/block-env-write.sh)
 echo "$out" | grep -q '"deny"' && echo OK write_hook || { echo FAIL write_hook; fail=1; }

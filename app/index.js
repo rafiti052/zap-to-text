@@ -8,6 +8,7 @@ import { mkdir, readFile, writeFile } from 'fs/promises'
 import { dirname, join } from 'path'
 import qrcode from 'qrcode-terminal'
 import pino from 'pino'
+import { isValidGroupJid, shouldProcessRemoteJid } from './gate.js'
 
 const GROUP_JID = String(process.env.TRANSCRIBE_GROUP_JID || '').trim()
 const AUTH_DIR = process.env.AUTH_DIR || join(process.cwd(), 'data', 'auth')
@@ -24,10 +25,20 @@ if (!OPENAI_API_KEY) {
   process.exit(1)
 }
 
+if (GROUP_JID && !isValidGroupJid(GROUP_JID)) {
+  logger.error(
+    { value: GROUP_JID },
+    'TRANSCRIBE_GROUP_JID must be a WhatsApp group id ending in @g.us (or leave empty to list groups)',
+  )
+  process.exit(1)
+}
+
 /** @type {Set<string>} */
 let seenIds = new Set()
 /** @type {Promise<void>} */
 let queueTail = Promise.resolve()
+/** @type {import('@whiskeysockets/baileys').WASocket | null} */
+let sock = null
 
 async function loadSeenIds() {
   try {
@@ -158,7 +169,7 @@ async function transcribeWithWhisper(buffer, mimeType) {
   return String(text)
 }
 
-async function processAudio(sock, msg) {
+async function processAudio(activeSock, msg) {
   const remoteJid = msg.key.remoteJid
   const messageId = msg.key.id
   const fromMe = Boolean(msg.key.fromMe)
@@ -188,7 +199,7 @@ async function processAudio(sock, msg) {
       {},
       {
         logger,
-        reuploadRequest: sock.updateMediaMessage,
+        reuploadRequest: activeSock.updateMediaMessage,
       },
     )
 
@@ -209,13 +220,13 @@ async function processAudio(sock, msg) {
 
     const chunks = chunkText(text)
     for (const chunk of chunks) {
-      await sock.sendMessage(remoteJid, { text: chunk }, { quoted: msg })
+      await activeSock.sendMessage(remoteJid, { text: chunk }, { quoted: msg })
     }
     logger.info({ messageId, chunks: chunks.length }, 'quoted reply sent')
   } catch (err) {
     logger.error({ messageId, err: String(err), stack: err?.stack }, 'transcription pipeline failed')
     try {
-      await sock.sendMessage(remoteJid, { text: FAIL_REPLY }, { quoted: msg })
+      await activeSock.sendMessage(remoteJid, { text: FAIL_REPLY }, { quoted: msg })
     } catch (sendErr) {
       logger.error({ messageId, err: String(sendErr) }, 'failed to send failure reply')
     }
@@ -226,10 +237,27 @@ function hasAudioMessage(msg) {
   return Boolean(msg?.message?.audioMessage)
 }
 
+function cleanupSocket(previous) {
+  if (!previous) return
+  try {
+    previous.ev.removeAllListeners()
+  } catch {
+    // ignore
+  }
+  try {
+    previous.end(undefined)
+  } catch {
+    // ignore
+  }
+}
+
 async function connectWhatsApp() {
+  cleanupSocket(sock)
+  sock = null
+
   const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR)
 
-  const sock = makeWASocket({
+  const nextSock = makeWASocket({
     auth: state,
     logger,
     markOnlineOnConnect: false,
@@ -237,73 +265,80 @@ async function connectWhatsApp() {
     syncFullHistory: false,
     getMessage: async () => undefined,
   })
+  sock = nextSock
 
-  sock.ev.on('creds.update', saveCreds)
+  nextSock.ev.on('creds.update', saveCreds)
 
-  sock.ev.on('connection.update', async (update) => {
-    const { connection, lastDisconnect, qr } = update
-    if (qr) {
-      logger.info('Scan this QR with WhatsApp (Linked Devices):')
-      qrcode.generate(qr, { small: true })
-    }
-    if (connection === 'open') {
-      if (!GROUP_JID) {
-        logger.warn('TRANSCRIBE_GROUP_JID is not set — listing your WhatsApp groups')
-        try {
-          const groups = await sock.groupFetchAllParticipating()
-          const entries = Object.values(groups || {})
-          if (!entries.length) {
-            logger.warn(
-              'No groups found. Create a WhatsApp group, then restart and set TRANSCRIBE_GROUP_JID in .env',
-            )
-          } else {
-            for (const g of entries) {
-              logger.info({ name: g.subject, jid: g.id }, 'group')
-            }
-            logger.warn(
-              'Copy the jid of your transcription group into .env as TRANSCRIBE_GROUP_JID=...@g.us, then restart (./up.sh or docker compose up -d)',
-            )
-          }
-        } catch (err) {
-          logger.error({ err: String(err) }, 'failed to list groups')
+  nextSock.ev.on('connection.update', (update) => {
+    void (async () => {
+      try {
+        const { connection, lastDisconnect, qr } = update
+        if (qr) {
+          logger.info('Scan this QR with WhatsApp (Linked Devices):')
+          qrcode.generate(qr, { small: true })
         }
-        logger.warn('Audio will not be processed until TRANSCRIBE_GROUP_JID is configured')
-      } else {
-        logger.info({ group: GROUP_JID }, 'WhatsApp connection open')
-      }
-    }
-    if (connection === 'close') {
-      const err = lastDisconnect?.error
-      const statusCode = (err instanceof Boom ? err : new Boom(err))?.output?.statusCode
-      const shouldReconnect = statusCode !== DisconnectReason.loggedOut
-      logger.warn({ statusCode, shouldReconnect }, 'connection closed')
-      if (shouldReconnect) {
-        setTimeout(() => {
-          connectWhatsApp().catch((reconnectErr) => {
-            logger.error({ err: String(reconnectErr) }, 'reconnect failed')
+        if (connection === 'open') {
+          if (!GROUP_JID) {
+            logger.warn('TRANSCRIBE_GROUP_JID is not set — listing your WhatsApp groups')
+            try {
+              const groups = await nextSock.groupFetchAllParticipating()
+              const entries = Object.values(groups || {})
+              if (!entries.length) {
+                logger.warn(
+                  'No groups found. Create a WhatsApp group, then restart and set TRANSCRIBE_GROUP_JID in .env',
+                )
+              } else {
+                for (const g of entries) {
+                  logger.info({ name: g.subject, jid: g.id }, 'group')
+                }
+                logger.warn(
+                  'Copy the jid of your transcription group into .env as TRANSCRIBE_GROUP_JID=...@g.us, then restart (./up.sh or docker compose up -d)',
+                )
+              }
+            } catch (err) {
+              logger.error({ err: String(err) }, 'failed to list groups')
+            }
+            logger.warn('Audio will not be processed until TRANSCRIBE_GROUP_JID is configured')
+          } else {
+            logger.info({ group: GROUP_JID }, 'WhatsApp connection open')
+          }
+        }
+        if (connection === 'close') {
+          const err = lastDisconnect?.error
+          const statusCode = (err instanceof Boom ? err : new Boom(err))?.output?.statusCode
+          const shouldReconnect = statusCode !== DisconnectReason.loggedOut
+          logger.warn({ statusCode, shouldReconnect }, 'connection closed')
+          if (shouldReconnect) {
+            setTimeout(() => {
+              connectWhatsApp().catch((reconnectErr) => {
+                logger.error({ err: String(reconnectErr) }, 'reconnect failed')
+                process.exit(1)
+              })
+            }, 1500)
+          } else {
+            logger.error('logged out — delete data/auth and restart to get a new QR')
             process.exit(1)
-          })
-        }, 1500)
-      } else {
-        logger.error('logged out — delete data/auth and restart to get a new QR')
-        process.exit(1)
+          }
+        }
+      } catch (err) {
+        logger.error({ err: String(err), stack: err?.stack }, 'connection.update handler failed')
       }
-    }
+    })()
   })
 
-  sock.ev.on('messages.upsert', ({ messages }) => {
+  nextSock.ev.on('messages.upsert', ({ messages }) => {
     for (const msg of messages || []) {
       const remoteJid = msg?.key?.remoteJid
       if (!remoteJid) continue
 
-      if (!GROUP_JID) {
-        // Waiting for TRANSCRIBE_GROUP_JID — do not process any audio
-        logger.info({ remoteJid }, 'ignored (group jid not configured)')
-        continue
-      }
+      // Discovery mode: discard everything quietly (group list is printed on connect)
+      if (!GROUP_JID) continue
 
-      if (remoteJid !== GROUP_JID) {
-        logger.info({ remoteJid }, 'ignored')
+      if (!shouldProcessRemoteJid(GROUP_JID, remoteJid)) {
+        // Other groups: one quiet ignored log. DMs: silent.
+        if (remoteJid.endsWith('@g.us')) {
+          logger.info({ remoteJid }, 'ignored')
+        }
         continue
       }
 
@@ -313,7 +348,7 @@ async function connectWhatsApp() {
       }
 
       // Serial queue: one audio at a time
-      enqueue(() => processAudio(sock, msg))
+      enqueue(() => processAudio(nextSock, msg))
     }
   })
 }

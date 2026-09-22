@@ -50,9 +50,9 @@ With the container running and `TRANSCRIBE_GROUP_JID` still unset, the app lists
 docker compose logs -f zap-to-text
 ```
 
-Look for lines like `group` with `name` and `jid` (ends in `@g.us`).
+Look for lines like `group` with `name` and `jid` (ends in `@g.us`). Copy the jid of your transcription group.
 
-Alternatively, send any text in the group and check the logs for `ignored` / `ignored (group jid not configured)` — the `remoteJid` is the group JID.
+Until `TRANSCRIBE_GROUP_JID` is set, incoming messages are discarded quietly (no per-chat spam in the logs).
 
 ### 6. Set the group JID and restart
 
@@ -79,6 +79,20 @@ Forward a voice note to that group. The bot replies with the transcript and writ
 ## Privacy & advanced notes
 
 See [LOCAL_SETUP.md](LOCAL_SETUP.md) for privacy guarantees, Docker Desktop tips, and useful commands.
+
+## Optional checks
+
+```bash
+# Privacy gate unit tests (Node 20+)
+node --test app/gate.test.js
+
+# Cursor .env hook self-test (best-effort; not a sandbox)
+bash .cursor/hooks/selftest.sh
+```
+
+### Cursor `.env` hooks
+
+This repo ships Cursor hooks that block agents from reading/writing `.env` via Read, Write, and obvious Shell paths (including some concatenation bypasses). They are **best-effort**: they are not an absolute sandbox, do not replace `.gitignore`, and determined bypasses may still exist. Keep secrets out of the repo and treat hooks as a seatbelt, not a vault.
 
 ## License
 

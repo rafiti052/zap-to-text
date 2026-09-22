@@ -6,7 +6,8 @@
   "description": "WhatsApp group audio → whisper-1 → quoted reply + markdown",
   "main": "index.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node index.js",
+    "test": "node --test gate.test.js"
   },
   "engines": {
     "node": ">=20"

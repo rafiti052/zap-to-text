@@ -45,6 +45,25 @@ mentions_protected_env() {
   printf '%s' "$scrubbed" | grep -q '\.env'
 }
 
+# Shell: deny only when it looks like file access, not a prose mention of ".env".
+# After normalize, require both a protected .env token and an accessor / path tool.
+shell_touches_protected_env() {
+  local s="$1"
+  local scrubbed
+  scrubbed=$(printf '%s' "$s" | sed 's/\.env\.example//g')
+  scrubbed=$(normalize_env_bypasses "$scrubbed")
+  scrubbed=$(printf '%s' "$scrubbed" | sed 's/\.env\.example//g')
+  if ! printf '%s' "$scrubbed" | grep -q '\.env'; then
+    return 1
+  fi
+  # Accessors / tools that read or write files (mere "mention .env" in a commit msg → allow)
+  if printf '%s' "$scrubbed" | grep -qiE \
+    '(--env-file|env[_-]?file|readFile|writeFile|readFileSync|writeFileSync|createReadStream|createWriteStream|Path\(|open\(|\bcat\b|\bsource\b|\bcp\b|\bmv\b|\brm\b|\btee\b|\bhead\b|\btail\b|\bless\b|\bmore\b|\bnano\b|\bvim\b|\bvi\b|\bed\b|\bcurl\b|\bwget\b|\bxargs\b|\bdd\b)'; then
+    return 0
+  fi
+  return 1
+}
+
 deny_json() {
   local msg="$1"
   jq -n --arg msg "$msg" \

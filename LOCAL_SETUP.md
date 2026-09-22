@@ -3,7 +3,7 @@
 For first-time setup (`.env`, QR, create group, discover JID), follow the main [README.md](README.md).
 
 **Trigger:** any `audioMessage` in the configured group (`TRANSCRIBE_GROUP_JID`), including your own / PTT  
-**Privacy:** other chats are ignored immediately — log only `ignored` + jid; no media download, OpenAI, markdown, or reply  
+**Privacy:** other chats are ignored immediately — other groups may log `ignored` + jid; DMs are silent; no media download, OpenAI, markdown, or reply  
 **Presence:** `markOnlineOnConnect: false`, no `readMessages`
 
 ## Start / stop
@@ -39,12 +39,16 @@ Long transcripts are split into WhatsApp-sized chunks; each chunk quotes the ori
 | Layer | Behavior |
 |-------|----------|
 | App | `remoteJid` must equal `TRANSCRIBE_GROUP_JID` **before** any download/OpenAI/file/content log |
-| Drop path | log `ignored` + jid only |
+| Drop path | other `@g.us` groups: log `ignored` + jid only; DMs: silent |
 | Presence | offline connect; no read receipts from this client |
 | Ports | none published |
 | Network | Compose default only — no custom or external network |
 
 Honest limit: a linked WhatsApp device still *receives* protocol events for other chats (gray ticks). This process does not download, transcribe, save, or reply to them.
+
+### Cursor `.env` hooks
+
+Hooks under `.cursor/hooks/` block agents from obvious Read/Write/Shell access to `.env` (and some path-construction bypasses). **Best-effort only** — not an absolute sandbox; they do not replace `.gitignore` or OS-level secret hygiene.
 
 ### Leak test
 
@@ -52,7 +56,7 @@ Honest limit: a linked WhatsApp device still *receives* protocol events for othe
 docker compose logs -f zap-to-text
 ```
 
-Send audio/text in another chat → expect only `ignored`; zero new `./transcripts/` files; zero replies outside the group. Then forward audio to your transcription group → quoted reply + one `.md`.
+Send audio/text in another chat → expect no new `./transcripts/` files and no replies outside the group (DMs stay silent in logs; other groups may show `ignored`). Then forward audio to your transcription group → quoted reply + one `.md`.
 
 ## WhatsApp QR (first time / reconnect)
 
