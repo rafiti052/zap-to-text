@@ -45,20 +45,24 @@ mentions_protected_env() {
   printf '%s' "$scrubbed" | grep -q '\.env'
 }
 
-# Shell: deny only when it looks like file access, not a prose mention of ".env".
-# After normalize, require both a protected .env token and an accessor / path tool.
+# Shell: deny file access to .env; allow prose mentions inside quotes (e.g. commit messages).
 shell_touches_protected_env() {
   local s="$1"
-  local scrubbed
+  local scrubbed bare
   scrubbed=$(printf '%s' "$s" | sed 's/\.env\.example//g')
   scrubbed=$(normalize_env_bypasses "$scrubbed")
   scrubbed=$(printf '%s' "$scrubbed" | sed 's/\.env\.example//g')
   if ! printf '%s' "$scrubbed" | grep -q '\.env'; then
     return 1
   fi
-  # Accessors / tools that read or write files (mere "mention .env" in a commit msg → allow)
+  # Path-like: .env still present after stripping quoted strings → file path / arg
+  bare=$(printf '%s' "$scrubbed" | sed -E 's/"([^"\\]|\\.)*"|'\''([^'\''\\]|\\.)*'\''//g')
+  if printf '%s' "$bare" | grep -q '\.env'; then
+    return 0
+  fi
+  # Quoted .env but with a file accessor (open(".env"), Path(".env"), etc.)
   if printf '%s' "$scrubbed" | grep -qiE \
-    '(--env-file|env[_-]?file|readFile|writeFile|readFileSync|writeFileSync|createReadStream|createWriteStream|Path\(|open\(|\bcat\b|\bsource\b|\bcp\b|\bmv\b|\brm\b|\btee\b|\bhead\b|\btail\b|\bless\b|\bmore\b|\bnano\b|\bvim\b|\bvi\b|\bed\b|\bcurl\b|\bwget\b|\bxargs\b|\bdd\b)'; then
+    '(--env-file|env[_-]?file|readFile|writeFile|readFileSync|writeFileSync|createReadStream|createWriteStream|File\.read|pathlib|Path\(|open\(|\bcat\b|\bsource\b|\bcp\b|\bmv\b|\brm\b|\btee\b|\bhead\b|\btail\b|\bless\b|\bmore\b|\bgrep\b|\bsed\b|\bawk\b|\bcut\b|\bwc\b|\bod\b|\bhexdump\b|\bbase64\b|\bnl\b|\bnano\b|\bvim\b|\bvi\b|\bed\b|\bcurl\b|\bwget\b|\bxargs\b|\bdd\b|\bruby\b|\bperl\b)'; then
     return 0
   fi
   return 1

@@ -33,6 +33,9 @@ check example allow mentions_protected_env 'cp .env.example ./tmp'
 check shell_concat deny shell_touches_protected_env 'p=("."+"env"); open(p)'
 check shell_compose deny shell_touches_protected_env 'docker compose --env-file .env up'
 check shell_chr deny shell_touches_protected_env 'open(chr(46)+"env")'
+check shell_grep deny shell_touches_protected_env 'grep OPENAI .env'
+check shell_sed deny shell_touches_protected_env 'sed -n 1p .env'
+check shell_awk deny shell_touches_protected_env 'awk 1 .env'
 check shell_prose allow shell_touches_protected_env "echo 'docs mention .env file'"
 check shell_dotenv_word allow shell_touches_protected_env "echo 'docs mention dotenv file'"
 check shell_readme allow shell_touches_protected_env 'cat ./readme.md'

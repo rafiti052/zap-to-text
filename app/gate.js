@@ -5,7 +5,8 @@
  */
 export function isValidGroupJid(jid) {
   const s = String(jid || '').trim()
-  return s.length > 0 && s.endsWith('@g.us')
+  // WhatsApp group JIDs: digits, optional -digits, then @g.us
+  return /^[0-9]+(-[0-9]+)?@g\.us$/.test(s)
 }
 
 /**
