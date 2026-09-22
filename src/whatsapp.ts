@@ -17,12 +17,18 @@ import {
   logger,
 } from './config.js'
 import { shouldProcessRemoteJid } from './gate.js'
+import {
+  isLiveSocket,
+  normalizeAudioBuffer,
+  shouldUnmarkAfterFailure,
+} from './pipeline.js'
 import { chunkText, saveTranscriptMarkdown } from './transcript.js'
 import { transcribeWithWhisper } from './whisper.js'
 
 let seenIds = new Set<string>()
 let queueTail: Promise<unknown> = Promise.resolve()
 let sock: WASocket | null = null
+let connectionOpen = false
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null
 let connecting = false
 
@@ -41,7 +47,10 @@ export async function loadSeenIds(): Promise<void> {
     }
     logger.info({ count: seenIds.size }, 'loaded seen ids')
   } catch (err) {
-    const code = err && typeof err === 'object' && 'code' in err ? (err as NodeJS.ErrnoException).code : undefined
+    const code =
+      err && typeof err === 'object' && 'code' in err
+        ? (err as NodeJS.ErrnoException).code
+        : undefined
     if (code === 'ENOENT') {
       seenIds = new Set()
       return
@@ -75,6 +84,12 @@ async function unmarkSeen(messageId: string): Promise<void> {
   }
 }
 
+function assertLive(activeSock: WASocket | null, phase: string): asserts activeSock is WASocket {
+  if (!isLiveSocket(activeSock, sock, connectionOpen)) {
+    throw new Error(`socket replaced ${phase}`)
+  }
+}
+
 async function processAudio(activeSock: WASocket | null, msg: WAMessage): Promise<void> {
   const remoteJid = msg.key.remoteJid
   const messageId = msg.key.id
@@ -90,7 +105,7 @@ async function processAudio(activeSock: WASocket | null, msg: WAMessage): Promis
     return
   }
 
-  if (!activeSock || activeSock !== sock) {
+  if (!isLiveSocket(activeSock, sock, connectionOpen)) {
     logger.warn({ messageId }, 'socket no longer active; skip until message is resent')
     return
   }
@@ -107,11 +122,9 @@ async function processAudio(activeSock: WASocket | null, msg: WAMessage): Promis
   const mimeType = audio?.mimetype || 'audio/ogg; codecs=opus'
 
   try {
-    if (activeSock !== sock) {
-      throw new Error('socket replaced before download')
-    }
+    assertLive(activeSock, 'before download')
     logger.info({ messageId, remoteJid }, 'downloading audio')
-    const buffer = await downloadMediaMessage(
+    const raw = await downloadMediaMessage(
       msg,
       'buffer',
       {},
@@ -120,14 +133,21 @@ async function processAudio(activeSock: WASocket | null, msg: WAMessage): Promis
         reuploadRequest: activeSock.updateMediaMessage,
       },
     )
+    const buffer = normalizeAudioBuffer(raw)
 
-    if (!Buffer.isBuffer(buffer) || !buffer.length) {
-      throw new Error('empty media buffer')
-    }
-
+    assertLive(activeSock, 'before whisper')
     logger.info({ messageId, bytes: buffer.length }, 'transcribing with whisper-1')
     const text = await transcribeWithWhisper(buffer, mimeType)
 
+    assertLive(activeSock, 'before reply')
+    const chunks = chunkText(text)
+    for (const chunk of chunks) {
+      assertLive(activeSock, 'before reply chunk')
+      await activeSock.sendMessage(remoteJid, { text: chunk }, { quoted: msg })
+    }
+    logger.info({ messageId, chunks: chunks.length }, 'quoted reply sent')
+
+    // Persist markdown only after a successful reply to avoid orphans on reconnect
     const path = await saveTranscriptMarkdown({
       transcriptionText: text,
       remoteJid,
@@ -135,28 +155,25 @@ async function processAudio(activeSock: WASocket | null, msg: WAMessage): Promis
       fromMe,
     })
     logger.info({ messageId, path }, 'markdown saved')
-
-    if (activeSock !== sock) {
-      throw new Error('socket replaced before reply')
-    }
-    const chunks = chunkText(text)
-    for (const chunk of chunks) {
-      await activeSock.sendMessage(remoteJid, { text: chunk }, { quoted: msg })
-    }
-    logger.info({ messageId, chunks: chunks.length }, 'quoted reply sent')
   } catch (err) {
     const errText = String(err)
-    // Any failure after reconnect/socket identity change — allow retry on redelivery
-    if (activeSock !== sock || errText.includes('socket replaced')) {
+    if (
+      shouldUnmarkAfterFailure({
+        activeSock,
+        currentSock: sock,
+        connectionOpen,
+        errText,
+      })
+    ) {
       await unmarkSeen(messageId)
-      logger.warn({ messageId }, 'socket replaced mid-pipeline; will retry if message is redelivered')
+      logger.warn({ messageId }, 'connection lost mid-pipeline; will retry if message is redelivered')
       return
     }
     const stack = err instanceof Error ? err.stack : undefined
     logger.error({ messageId, err: errText, stack }, 'transcription pipeline failed')
     try {
-      if (activeSock === sock) {
-        await activeSock.sendMessage(remoteJid, { text: FAIL_REPLY }, { quoted: msg })
+      if (isLiveSocket(activeSock, sock, connectionOpen)) {
+        await activeSock!.sendMessage(remoteJid, { text: FAIL_REPLY }, { quoted: msg })
       }
     } catch (sendErr) {
       logger.error({ messageId, err: String(sendErr) }, 'failed to send failure reply')
@@ -199,6 +216,7 @@ export async function connectWhatsApp(): Promise<void> {
   if (connecting) return
   connecting = true
   try {
+    connectionOpen = false
     cleanupSocket(sock)
     sock = null
 
@@ -225,6 +243,7 @@ export async function connectWhatsApp(): Promise<void> {
             qrcode.generate(qr, { small: true })
           }
           if (connection === 'open') {
+            connectionOpen = true
             if (!GROUP_JID) {
               logger.warn('TRANSCRIBE_GROUP_JID is not set — listing your WhatsApp groups')
               try {
@@ -251,6 +270,8 @@ export async function connectWhatsApp(): Promise<void> {
             }
           }
           if (connection === 'close') {
+            // Mark dead immediately so in-flight jobs unmark instead of burning the id
+            connectionOpen = false
             const err = lastDisconnect?.error
             const statusCode = (err instanceof Boom ? err : new Boom(err))?.output?.statusCode
             const shouldReconnect = statusCode !== DisconnectReason.loggedOut
