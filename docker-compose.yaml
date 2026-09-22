@@ -10,7 +10,7 @@ name: zap-to-text
 services:
   zap-to-text:
     build:
-      context: ./app
+      context: .
     image: zap-to-text:local
     container_name: zap-to-text
     restart: unless-stopped
