@@ -17,7 +17,7 @@ services:
     env_file:
       - .env
     environment:
-      - TRANSCRIBE_GROUP_JID=120363412859178311@g.us
+      # TRANSCRIBE_GROUP_JID comes from env_file (.env) — required for transcription
       - AUTH_DIR=/app/data/auth
       - SEEN_IDS_PATH=/app/data/seen-ids.json
       - TRANSCRIPTS_DIR=/app/transcripts

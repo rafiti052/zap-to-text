@@ -12,6 +12,13 @@
         "command": "bash .cursor/hooks/block-env-shell.sh",
         "failClosed": true
       }
+    ],
+    "preToolUse": [
+      {
+        "command": "bash .cursor/hooks/block-env-write.sh",
+        "matcher": "Write|StrReplace|EditNotebook",
+        "failClosed": true
+      }
     ]
   }
 }

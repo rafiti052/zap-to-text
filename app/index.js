@@ -9,7 +9,7 @@ import { dirname, join } from 'path'
 import qrcode from 'qrcode-terminal'
 import pino from 'pino'
 
-const GROUP_JID = process.env.TRANSCRIBE_GROUP_JID || '120363412859178311@g.us'
+const GROUP_JID = String(process.env.TRANSCRIBE_GROUP_JID || '').trim()
 const AUTH_DIR = process.env.AUTH_DIR || join(process.cwd(), 'data', 'auth')
 const SEEN_IDS_PATH = process.env.SEEN_IDS_PATH || join(process.cwd(), 'data', 'seen-ids.json')
 const TRANSCRIPTS_DIR = process.env.TRANSCRIPTS_DIR || join(process.cwd(), 'transcripts')
@@ -240,14 +240,37 @@ async function connectWhatsApp() {
 
   sock.ev.on('creds.update', saveCreds)
 
-  sock.ev.on('connection.update', (update) => {
+  sock.ev.on('connection.update', async (update) => {
     const { connection, lastDisconnect, qr } = update
     if (qr) {
       logger.info('Scan this QR with WhatsApp (Linked Devices):')
       qrcode.generate(qr, { small: true })
     }
     if (connection === 'open') {
-      logger.info({ group: GROUP_JID }, 'WhatsApp connection open')
+      if (!GROUP_JID) {
+        logger.warn('TRANSCRIBE_GROUP_JID is not set — listing your WhatsApp groups')
+        try {
+          const groups = await sock.groupFetchAllParticipating()
+          const entries = Object.values(groups || {})
+          if (!entries.length) {
+            logger.warn(
+              'No groups found. Create a WhatsApp group, then restart and set TRANSCRIBE_GROUP_JID in .env',
+            )
+          } else {
+            for (const g of entries) {
+              logger.info({ name: g.subject, jid: g.id }, 'group')
+            }
+            logger.warn(
+              'Copy the jid of your transcription group into .env as TRANSCRIBE_GROUP_JID=...@g.us, then restart (./up.sh or docker compose up -d)',
+            )
+          }
+        } catch (err) {
+          logger.error({ err: String(err) }, 'failed to list groups')
+        }
+        logger.warn('Audio will not be processed until TRANSCRIBE_GROUP_JID is configured')
+      } else {
+        logger.info({ group: GROUP_JID }, 'WhatsApp connection open')
+      }
     }
     if (connection === 'close') {
       const err = lastDisconnect?.error
@@ -272,6 +295,12 @@ async function connectWhatsApp() {
     for (const msg of messages || []) {
       const remoteJid = msg?.key?.remoteJid
       if (!remoteJid) continue
+
+      if (!GROUP_JID) {
+        // Waiting for TRANSCRIBE_GROUP_JID — do not process any audio
+        logger.info({ remoteJid }, 'ignored (group jid not configured)')
+        continue
+      }
 
       if (remoteJid !== GROUP_JID) {
         logger.info({ remoteJid }, 'ignored')
