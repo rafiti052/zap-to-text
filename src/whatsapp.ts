@@ -2,59 +2,47 @@ import makeWASocket, {
   DisconnectReason,
   downloadMediaMessage,
   useMultiFileAuthState,
+  type WAMessage,
+  type WASocket,
 } from '@whiskeysockets/baileys'
 import { Boom } from '@hapi/boom'
 import { mkdir, readFile, writeFile } from 'fs/promises'
-import { dirname, join } from 'path'
+import { dirname } from 'path'
 import qrcode from 'qrcode-terminal'
-import pino from 'pino'
-import { isValidGroupJid, shouldProcessRemoteJid } from './gate.js'
+import {
+  AUTH_DIR,
+  FAIL_REPLY,
+  GROUP_JID,
+  SEEN_IDS_PATH,
+  logger,
+} from './config.js'
+import { shouldProcessRemoteJid } from './gate.js'
+import { chunkText, saveTranscriptMarkdown } from './transcript.js'
+import { transcribeWithWhisper } from './whisper.js'
 
-const GROUP_JID = String(process.env.TRANSCRIBE_GROUP_JID || '').trim()
-const AUTH_DIR = process.env.AUTH_DIR || join(process.cwd(), 'data', 'auth')
-const SEEN_IDS_PATH = process.env.SEEN_IDS_PATH || join(process.cwd(), 'data', 'seen-ids.json')
-const TRANSCRIPTS_DIR = process.env.TRANSCRIPTS_DIR || join(process.cwd(), 'transcripts')
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY || ''
-const WHATSAPP_CHUNK = 3500
-const FAIL_REPLY = 'Falha ao transcrever este áudio.'
-
-const logger = pino({ level: process.env.LOG_LEVEL || 'info' })
-
-if (!OPENAI_API_KEY) {
-  logger.error('OPENAI_API_KEY is missing — set it in .env')
-  process.exit(1)
-}
-
-if (GROUP_JID && !isValidGroupJid(GROUP_JID)) {
-  logger.error(
-    { value: GROUP_JID },
-    'TRANSCRIBE_GROUP_JID must be a WhatsApp group id ending in @g.us (or leave empty to list groups)',
-  )
-  process.exit(1)
-}
-
-/** @type {Set<string>} */
-let seenIds = new Set()
-/** @type {Promise<void>} */
-let queueTail = Promise.resolve()
-/** @type {import('@whiskeysockets/baileys').WASocket | null} */
-let sock = null
-/** @type {ReturnType<typeof setTimeout> | null} */
-let reconnectTimer = null
+let seenIds = new Set<string>()
+let queueTail: Promise<unknown> = Promise.resolve()
+let sock: WASocket | null = null
+let reconnectTimer: ReturnType<typeof setTimeout> | null = null
 let connecting = false
 
-async function loadSeenIds() {
+export async function loadSeenIds(): Promise<void> {
   try {
     const raw = await readFile(SEEN_IDS_PATH, 'utf8')
-    const parsed = JSON.parse(raw)
+    const parsed: unknown = JSON.parse(raw)
     if (Array.isArray(parsed)) {
       seenIds = new Set(parsed.map(String))
-    } else if (parsed && Array.isArray(parsed.ids)) {
-      seenIds = new Set(parsed.ids.map(String))
+    } else if (
+      parsed &&
+      typeof parsed === 'object' &&
+      Array.isArray((parsed as { ids?: unknown }).ids)
+    ) {
+      seenIds = new Set((parsed as { ids: unknown[] }).ids.map(String))
     }
     logger.info({ count: seenIds.size }, 'loaded seen ids')
   } catch (err) {
-    if (err && err.code === 'ENOENT') {
+    const code = err && typeof err === 'object' && 'code' in err ? (err as NodeJS.ErrnoException).code : undefined
+    if (code === 'ENOENT') {
       seenIds = new Set()
       return
     }
@@ -63,10 +51,9 @@ async function loadSeenIds() {
   }
 }
 
-async function persistSeenIds() {
+async function persistSeenIds(): Promise<void> {
   await mkdir(dirname(SEEN_IDS_PATH), { recursive: true })
   const ids = [...seenIds]
-  // Cap growth: keep the most recent ~5000
   const trimmed = ids.length > 5000 ? ids.slice(-5000) : ids
   if (trimmed.length !== ids.length) {
     seenIds = new Set(trimmed)
@@ -74,115 +61,35 @@ async function persistSeenIds() {
   await writeFile(SEEN_IDS_PATH, JSON.stringify({ ids: trimmed }, null, 0), 'utf8')
 }
 
-function enqueue(task) {
+function enqueue(task: () => Promise<unknown>): Promise<unknown> {
   queueTail = queueTail.then(task, task)
   return queueTail
 }
 
-function safeSlug(value, maxLen = 40) {
-  const cleaned = String(value || 'unknown')
-    .replace(/[^a-zA-Z0-9_-]+/g, '-')
-    .replace(/^-+|-+$/g, '')
-  return (cleaned || 'unknown').slice(0, maxLen)
-}
-
-function chunkText(text, size = WHATSAPP_CHUNK) {
-  const s = String(text || '').trim()
-  if (!s) return []
-  if (s.length <= size) return [s]
-  const parts = []
-  let i = 0
-  while (i < s.length) {
-    let end = Math.min(i + size, s.length)
-    if (end < s.length) {
-      const slice = s.slice(i, end)
-      const breakAt = Math.max(slice.lastIndexOf('\n'), slice.lastIndexOf(' '))
-      if (breakAt > size * 0.5) end = i + breakAt
-    }
-    parts.push(s.slice(i, end).trim())
-    i = end
+async function unmarkSeen(messageId: string): Promise<void> {
+  seenIds.delete(messageId)
+  try {
+    await persistSeenIds()
+  } catch (persistErr) {
+    logger.warn({ messageId, err: String(persistErr) }, 'failed to unmark seen id')
   }
-  return parts.filter(Boolean)
 }
 
-async function saveTranscriptMarkdown({
-  transcriptionText,
-  remoteJid,
-  messageId,
-  fromMe,
-}) {
-  await mkdir(TRANSCRIPTS_DIR, { recursive: true })
-  const now = new Date()
-  const pad = (n) => String(n).padStart(2, '0')
-  const stamp = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}_${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`
-  const contact = (remoteJid || '').split('@')[0] || 'unknown'
-  const filename = `${stamp}-${safeSlug(contact)}-${safeSlug(messageId, 12)}.md`
-  const path = join(TRANSCRIPTS_DIR, filename)
-  const iso = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())}T${pad(now.getHours())}:${pad(now.getMinutes())}:${pad(now.getSeconds())}`
-  const body = `---
-date: ${iso}
-contact: ${contact}
-remote_jid: ${remoteJid}
-message_id: ${messageId}
-from_me: ${fromMe ? 'true' : 'false'}
-instance: zap-to-text
----
-
-# Transcrição WhatsApp
-
-## Transcrição
-
-${String(transcriptionText || '').trim()}
-`
-  await writeFile(path, body, 'utf8')
-  return path
-}
-
-async function transcribeWithWhisper(buffer, mimeType) {
-  const form = new FormData()
-  const ext = (mimeType || '').includes('ogg')
-    ? 'ogg'
-    : (mimeType || '').includes('mpeg') || (mimeType || '').includes('mp3')
-      ? 'mp3'
-      : (mimeType || '').includes('mp4') || (mimeType || '').includes('m4a')
-        ? 'm4a'
-        : 'ogg'
-  const blob = new Blob([buffer], { type: mimeType || 'audio/ogg' })
-  form.append('file', blob, `audio.${ext}`)
-  form.append('model', 'whisper-1')
-
-  const res = await fetch('https://api.openai.com/v1/audio/transcriptions', {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${OPENAI_API_KEY}`,
-    },
-    body: form,
-  })
-
-  if (!res.ok) {
-    const detail = await res.text().catch(() => '')
-    throw new Error(`OpenAI transcription failed: ${res.status} ${detail.slice(0, 500)}`)
-  }
-
-  const data = await res.json()
-  const text = (data && data.text) || ''
-  if (!String(text).trim()) {
-    throw new Error('OpenAI returned empty transcription')
-  }
-  return String(text)
-}
-
-async function processAudio(activeSock, msg) {
+async function processAudio(activeSock: WASocket | null, msg: WAMessage): Promise<void> {
   const remoteJid = msg.key.remoteJid
   const messageId = msg.key.id
   const fromMe = Boolean(msg.key.fromMe)
+
+  if (!remoteJid) {
+    logger.warn('audio without remote jid; skipping')
+    return
+  }
 
   if (!messageId) {
     logger.warn('audio without message id; skipping')
     return
   }
 
-  // Socket may have been replaced by reconnect while this job waited in queue
   if (!activeSock || activeSock !== sock) {
     logger.warn({ messageId }, 'socket no longer active; skip until message is resent')
     return
@@ -193,7 +100,6 @@ async function processAudio(activeSock, msg) {
     return
   }
 
-  // Mark at START so failures do not loop
   seenIds.add(messageId)
   await persistSeenIds()
 
@@ -215,7 +121,7 @@ async function processAudio(activeSock, msg) {
       },
     )
 
-    if (!buffer || !buffer.length) {
+    if (!Buffer.isBuffer(buffer) || !buffer.length) {
       throw new Error('empty media buffer')
     }
 
@@ -240,17 +146,14 @@ async function processAudio(activeSock, msg) {
     logger.info({ messageId, chunks: chunks.length }, 'quoted reply sent')
   } catch (err) {
     const errText = String(err)
-    if (errText.includes('socket replaced')) {
-      seenIds.delete(messageId)
-      try {
-        await persistSeenIds()
-      } catch (persistErr) {
-        logger.warn({ messageId, err: String(persistErr) }, 'failed to unmark seen id after socket replace')
-      }
+    // Any failure after reconnect/socket identity change — allow retry on redelivery
+    if (activeSock !== sock || errText.includes('socket replaced')) {
+      await unmarkSeen(messageId)
       logger.warn({ messageId }, 'socket replaced mid-pipeline; will retry if message is redelivered')
       return
     }
-    logger.error({ messageId, err: errText, stack: err?.stack }, 'transcription pipeline failed')
+    const stack = err instanceof Error ? err.stack : undefined
+    logger.error({ messageId, err: errText, stack }, 'transcription pipeline failed')
     try {
       if (activeSock === sock) {
         await activeSock.sendMessage(remoteJid, { text: FAIL_REPLY }, { quoted: msg })
@@ -261,14 +164,16 @@ async function processAudio(activeSock, msg) {
   }
 }
 
-function hasAudioMessage(msg) {
+function hasAudioMessage(msg: WAMessage): boolean {
   return Boolean(msg?.message?.audioMessage)
 }
 
-function cleanupSocket(previous) {
+function cleanupSocket(previous: WASocket | null): void {
   if (!previous) return
   try {
-    previous.ev.removeAllListeners()
+    previous.ev.removeAllListeners('creds.update')
+    previous.ev.removeAllListeners('connection.update')
+    previous.ev.removeAllListeners('messages.upsert')
   } catch {
     // ignore
   }
@@ -279,7 +184,7 @@ function cleanupSocket(previous) {
   }
 }
 
-function scheduleReconnect() {
+function scheduleReconnect(): void {
   if (reconnectTimer) clearTimeout(reconnectTimer)
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null
@@ -290,7 +195,7 @@ function scheduleReconnect() {
   }, 1500)
 }
 
-async function connectWhatsApp() {
+export async function connectWhatsApp(): Promise<void> {
   if (connecting) return
   connecting = true
   try {
@@ -358,7 +263,8 @@ async function connectWhatsApp() {
             }
           }
         } catch (err) {
-          logger.error({ err: String(err), stack: err?.stack }, 'connection.update handler failed')
+          const stack = err instanceof Error ? err.stack : undefined
+          logger.error({ err: String(err), stack }, 'connection.update handler failed')
         }
       })()
     })
@@ -368,23 +274,17 @@ async function connectWhatsApp() {
         const remoteJid = msg?.key?.remoteJid
         if (!remoteJid) continue
 
-        // Discovery mode: discard everything quietly (group list is printed on connect)
         if (!GROUP_JID) continue
 
         if (!shouldProcessRemoteJid(GROUP_JID, remoteJid)) {
-          // Other groups: one quiet ignored log. DMs: silent.
           if (remoteJid.endsWith('@g.us')) {
             logger.info({ remoteJid }, 'ignored')
           }
           continue
         }
 
-        if (!hasAudioMessage(msg)) {
-          // Group non-audio: discard quietly (no content logs)
-          continue
-        }
+        if (!hasAudioMessage(msg)) continue
 
-        // Resolve live sock when the job runs (not the sock that enqueued it)
         enqueue(() => processAudio(sock, msg))
       }
     })
@@ -392,16 +292,3 @@ async function connectWhatsApp() {
     connecting = false
   }
 }
-
-async function main() {
-  await mkdir(AUTH_DIR, { recursive: true })
-  await mkdir(TRANSCRIPTS_DIR, { recursive: true })
-  await mkdir(dirname(SEEN_IDS_PATH), { recursive: true })
-  await loadSeenIds()
-  await connectWhatsApp()
-}
-
-main().catch((err) => {
-  logger.error({ err: String(err), stack: err?.stack }, 'fatal')
-  process.exit(1)
-})

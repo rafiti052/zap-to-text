@@ -2,10 +2,12 @@
 LOCAL_CREDENTIALS.txt
 .openai_key.tmp
 
+node_modules/
+dist/
+
 transcripts/*
 !transcripts/.gitkeep
 
 # Session + dedup (volume-mounted)
 data/auth/
 data/seen-ids.json
-app/node_modules/
