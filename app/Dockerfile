@@ -2,7 +2,7 @@ FROM node:20-alpine
 
 WORKDIR /app
 
-# Baileys (and transitive deps) may resolve packages via git URLs
+# WhatsApp client deps may resolve packages via git URLs
 RUN apk add --no-cache git
 
 COPY package.json ./

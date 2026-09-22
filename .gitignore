@@ -5,7 +5,7 @@ LOCAL_CREDENTIALS.txt
 transcripts/*
 !transcripts/.gitkeep
 
-# Baileys bridge session + dedup (volume-mounted)
+# Session + dedup (volume-mounted)
 data/auth/
 data/seen-ids.json
-bridge/node_modules/
+app/node_modules/

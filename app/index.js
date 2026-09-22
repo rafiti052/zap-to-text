@@ -111,7 +111,7 @@ contact: ${contact}
 remote_jid: ${remoteJid}
 message_id: ${messageId}
 from_me: ${fromMe ? 'true' : 'false'}
-instance: baileys-bridge
+instance: zap-to-text
 ---
 
 # Transcrição WhatsApp

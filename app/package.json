@@ -1,9 +1,9 @@
 {
-  "name": "transcrevezap-bridge",
+  "name": "zap-to-text",
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "Single-process Baileys bridge: group audio → whisper-1 → quoted reply + markdown",
+  "description": "WhatsApp group audio → whisper-1 → quoted reply + markdown",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
