@@ -1,13 +1,12 @@
-# zap-to-text
+# zap-to-text — privacy & advanced
 
-One local Docker container. Forwards WhatsApp voice notes from a single group to OpenAI Whisper and replies with the transcript.
+For first-time setup (`.env`, QR, create group, discover JID), follow the main [README.md](README.md).
 
-**Group:** `Audio Transcribe` → `120363412859178311@g.us`  
-**Trigger:** any `audioMessage` in that group (including your own / PTT)  
-**Privacy:** other chats are ignored immediately — log only `ignored` + jid; no media download, OpenAI, markdown, or reply  
+**Trigger:** any `audioMessage` in the configured group (`TRANSCRIBE_GROUP_JID`), including your own / PTT  
+**Privacy:** other chats are ignored immediately — other groups may log `ignored` + jid; DMs are silent; no media download, OpenAI, markdown, or reply  
 **Presence:** `markOnlineOnConnect: false`, no `readMessages`
 
-## Start once
+## Start / stop
 
 ```bash
 ./up.sh
@@ -18,7 +17,7 @@ Or: `docker compose --env-file .env up -d --build`
 Stop (keeps session data): `docker compose down`  
 (Do **not** use `-v` unless you intend to wipe auth + seen ids.)
 
-Requires `OPENAI_API_KEY` in `.env`.
+Requires `OPENAI_API_KEY` and `TRANSCRIBE_GROUP_JID` in `.env` for transcription.
 
 ### Docker Desktop (macOS)
 
@@ -27,7 +26,7 @@ Settings → General → **Start Docker Desktop when you log in**.
 
 ## Flow
 
-1. Forward a voice note to the WhatsApp group **Audio Transcribe**
+1. Forward a voice note to your configured WhatsApp group
 2. Bot replies in the group with the raw transcription (quoted on the audio). No summary.
 3. Markdown is written under `./transcripts/` (frontmatter + `## Transcrição` only)
 
@@ -39,13 +38,17 @@ Long transcripts are split into WhatsApp-sized chunks; each chunk quotes the ori
 
 | Layer | Behavior |
 |-------|----------|
-| App | `remoteJid` must equal the group JID **before** any download/OpenAI/file/content log |
-| Drop path | log `ignored` + jid only |
+| App | `remoteJid` must equal `TRANSCRIBE_GROUP_JID` **before** any download/OpenAI/file/content log |
+| Drop path | other `@g.us` groups: log `ignored` + jid only; DMs: silent |
 | Presence | offline connect; no read receipts from this client |
 | Ports | none published |
 | Network | Compose default only — no custom or external network |
 
 Honest limit: a linked WhatsApp device still *receives* protocol events for other chats (gray ticks). This process does not download, transcribe, save, or reply to them.
+
+### Cursor `.env` hooks
+
+Hooks under `.cursor/hooks/` block agents from obvious Read/Write/Shell access to `.env` (and some path-construction bypasses). **Best-effort only** — not an absolute sandbox; they do not replace `.gitignore` or OS-level secret hygiene.
 
 ### Leak test
 
@@ -53,7 +56,7 @@ Honest limit: a linked WhatsApp device still *receives* protocol events for othe
 docker compose logs -f zap-to-text
 ```
 
-Send audio/text in another chat → expect only `ignored`; zero new `./transcripts/` files; zero replies outside the group. Then forward audio to **Audio Transcribe** → quoted reply + one `.md`.
+Send audio/text in another chat → expect no new `./transcripts/` files and no replies outside the group (DMs stay silent in logs; other groups may show `ignored`). Then forward audio to your transcription group → quoted reply + one `.md`.
 
 ## WhatsApp QR (first time / reconnect)
 

@@ -8,7 +8,7 @@ RUN apk add --no-cache git
 COPY package.json ./
 RUN npm install --omit=dev
 
-COPY index.js ./
+COPY index.js gate.js ./
 
 ENV NODE_ENV=production
 ENV AUTH_DIR=/app/data/auth
